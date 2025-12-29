@@ -135,8 +135,8 @@ function initDatabase() {
       // Create default admin user
       const adminEmail = 'admin@hospital.com';
       const adminPassword = 'admin123';
-      const adminUsername = 'admin';
-      const adminRole = 'admin';
+      const adminUsername = 'Sunam Ghosh';
+      const adminRole = 'Superadmin';
 
       bcrypt.hash(adminPassword, 10, (err, hash) => {
         if (err) {
