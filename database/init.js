@@ -4,7 +4,7 @@ const fs = require('fs');
 const bcrypt = require('bcryptjs');
 
 // Define the safe database path in the "Hospital Data" folder
-const DATA_FOLDER = 'D:/Hospital Management System/Hospital Data';
+const DATA_FOLDER = 'D:/Hospital Management System/backend/Hospital Data';
 const DB_PATH = path.join(DATA_FOLDER, 'hospital.db');
 
 // Ensure the data folder exists
