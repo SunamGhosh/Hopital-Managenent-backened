@@ -1,7 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const { initDatabase } = require('./database/init');
+const connectDB = require('./database/db');
+const seedAdmin = require('./database/seeder');
 
 dotenv.config();
 
@@ -28,12 +29,18 @@ app.get('/api/health', (req, res) => {
 });
 
 // Initialize database and start server
-initDatabase().then(() => {
-  app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-  });
-}).catch(err => {
-  console.error('Failed to initialize database:', err);
-  process.exit(1);
-});
+const startServer = async () => {
+  try {
+    await connectDB();
+    await seedAdmin();
+    app.listen(PORT, () => {
+      console.log(`Server is running on port ${PORT}`);
+    });
+  } catch (err) {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  }
+};
+
+startServer();
 

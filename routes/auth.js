@@ -2,8 +2,10 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
-const { get, run } = require('../database/db');
 const { authenticateToken } = require('../middleware/auth');
+const User = require('../models/User');
+const Patient = require('../models/Patient');
+const Doctor = require('../models/Doctor');
 
 const router = express.Router();
 
@@ -26,7 +28,7 @@ router.post('/register', [
     const { username, email, password, first_name, last_name, date_of_birth, gender, phone, address } = req.body;
 
     // Check if user exists
-    const existingUser = await get('SELECT * FROM users WHERE email = ? OR username = ?', [email, username]);
+    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
     if (existingUser) {
       return res.status(400).json({ error: 'User already exists' });
     }
@@ -35,22 +37,28 @@ router.post('/register', [
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Generate patient ID
-    const patientId = 'PAT' + Date.now().toString().slice(-8);
+    const patientCode = 'PAT' + Date.now().toString().slice(-8);
 
     // Create patient record first
-    const patientResult = await run(
-      `INSERT INTO patients (
-        patient_id, first_name, last_name, date_of_birth, gender,
-        phone, email, address
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [patientId, first_name, last_name, date_of_birth, gender, phone, email, address]
-    );
+    const patient = await Patient.create({
+      patient_id: patientCode,
+      first_name,
+      last_name,
+      date_of_birth,
+      gender,
+      phone,
+      email,
+      address
+    });
 
     // Insert user linked to patient
-    await run(
-      'INSERT INTO users (username, email, password, role, patient_id) VALUES (?, ?, ?, ?, ?)',
-      [username, email, hashedPassword, 'customer', patientResult.id]
-    );
+    await User.create({
+      username,
+      email,
+      password: hashedPassword,
+      role: 'customer',
+      patient_id: patient._id
+    });
 
     res.status(201).json({ message: 'Registration successful. Please login.' });
   } catch (error) {
@@ -73,7 +81,7 @@ router.post('/login', [
     const { email, password } = req.body;
 
     // Find user
-    const user = await get('SELECT * FROM users WHERE email = ?', [email]);
+    const user = await User.findOne({ email });
     if (!user) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -86,7 +94,7 @@ router.post('/login', [
 
     // Generate token
     const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
+      { id: user._id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
@@ -94,7 +102,7 @@ router.post('/login', [
     res.json({
       token,
       user: {
-        id: user.id,
+        id: user._id,
         username: user.username,
         email: user.email,
         role: user.role
@@ -109,19 +117,18 @@ router.post('/login', [
 // Get current user with linked data
 router.get('/me', authenticateToken, async (req, res) => {
   try {
-    const user = await get(
-      `SELECT u.id, u.username, u.email, u.role, u.patient_id, u.doctor_id,
-              p.patient_id as patient_code, p.first_name as patient_first_name, p.last_name as patient_last_name,
-              d.doctor_id as doctor_code, d.first_name as doctor_first_name, d.last_name as doctor_last_name
-       FROM users u
-       LEFT JOIN patients p ON u.patient_id = p.id
-       LEFT JOIN doctors d ON u.doctor_id = d.id
-       WHERE u.id = ?`,
-      [req.user.id]
-    );
+    const user = await User.findById(req.user.id)
+      .populate('patient_id')
+      .populate('doctor_id')
+      .select('-password');
+
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
+
+    // Transform to match previous structure somewhat, or just return the object
+    // The previous structure flattened everything. Let's keep it structured but easy to consume.
+    // Ideally, frontend should adapt, but to minimize frontend breakage, I'll return the populated user.
     res.json(user);
   } catch (error) {
     console.error('Get user error:', error);
@@ -130,4 +137,3 @@ router.get('/me', authenticateToken, async (req, res) => {
 });
 
 module.exports = router;
-

@@ -1,8 +1,9 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { body, validationResult } = require('express-validator');
-const { query, run, get } = require('../database/db');
 const { authenticateToken, authorize } = require('../middleware/auth');
+const Doctor = require('../models/Doctor');
+const User = require('../models/User');
 
 const router = express.Router();
 
@@ -19,28 +20,26 @@ router.get('/', async (req, res) => {
   try {
     const { search, specialization, status } = req.query;
 
-    let sql = 'SELECT * FROM doctors WHERE 1=1';
-    const params = [];
+    let query = {};
 
     if (search) {
-      sql += ' AND (first_name LIKE ? OR last_name LIKE ? OR doctor_id LIKE ?)';
-      const searchTerm = `%${search}%`;
-      params.push(searchTerm, searchTerm, searchTerm);
+      const regex = new RegExp(search, 'i');
+      query.$or = [
+        { first_name: regex },
+        { last_name: regex },
+        { doctor_id: regex }
+      ];
     }
 
     if (specialization) {
-      sql += ' AND specialization = ?';
-      params.push(specialization);
+      query.specialization = specialization;
     }
 
     if (status) {
-      sql += ' AND status = ?';
-      params.push(status);
+      query.status = status;
     }
 
-    sql += ' ORDER BY created_at DESC';
-
-    const doctors = await query(sql, params);
+    const doctors = await Doctor.find(query).sort({ created_at: -1 });
     res.json(doctors);
   } catch (error) {
     console.error('Get doctors error:', error);
@@ -51,7 +50,7 @@ router.get('/', async (req, res) => {
 // Get doctor by ID
 router.get('/:id', async (req, res) => {
   try {
-    const doctor = await get('SELECT * FROM doctors WHERE id = ?', [req.params.id]);
+    const doctor = await Doctor.findById(req.params.id);
     if (!doctor) {
       return res.status(404).json({ error: 'Doctor not found' });
     }
@@ -85,7 +84,7 @@ router.post('/', authorize('admin'), [
     } = req.body;
 
     // Check if user already exists
-    const existingUser = await get('SELECT * FROM users WHERE email = ? OR username = ?', [email, username]);
+    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
     if (existingUser) {
       return res.status(400).json({ error: 'User with this email or username already exists' });
     }
@@ -93,27 +92,26 @@ router.post('/', authorize('admin'), [
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const doctorId = generateDoctorId();
-    const result = await run(
-      `INSERT INTO doctors (
-        doctor_id, first_name, last_name, specialization, phone, email,
-        qualification, experience_years, consultation_fee,
-        available_days, available_time_start, available_time_end, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [doctorId, first_name, last_name, specialization, phone, email,
-       qualification, experience_years, consultation_fee,
-       available_days, available_time_start, available_time_end, status]
-    );
+    const doctorCode = generateDoctorId();
+
+    const doctor = await Doctor.create({
+      doctor_id: doctorCode,
+      first_name, last_name, specialization, phone, email,
+      qualification, experience_years, consultation_fee,
+      available_days, available_time_start, available_time_end, status
+    });
 
     // Create user account linked to doctor
-    await run(
-      'INSERT INTO users (username, email, password, role, doctor_id) VALUES (?, ?, ?, ?, ?)',
-      [username, email, hashedPassword, 'doctor', result.id]
-    );
+    await User.create({
+      username,
+      email,
+      password: hashedPassword,
+      role: 'doctor',
+      doctor_id: doctor._id
+    });
 
-    const doctor = await get('SELECT * FROM doctors WHERE id = ?', [result.id]);
-    res.status(201).json({ 
-      ...doctor, 
+    res.status(201).json({
+      ...doctor.toObject(),
       message: 'Doctor created successfully. Login credentials have been set.',
       login_email: email,
       login_username: username
@@ -129,33 +127,25 @@ router.put('/:id', async (req, res) => {
   try {
     // Check if doctor is trying to update their own profile
     if (req.user.role === 'doctor') {
-      const user = await get('SELECT doctor_id FROM users WHERE id = ?', [req.user.id]);
-      if (!user || user.doctor_id !== parseInt(req.params.id)) {
+      const user = await User.findById(req.user.id);
+      if (!user || !user.doctor_id || user.doctor_id.toString() !== req.params.id) {
         return res.status(403).json({ error: 'You can only update your own profile' });
       }
     } else if (req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
 
-    const {
-      first_name, last_name, specialization, phone, email,
-      qualification, experience_years, consultation_fee,
-      available_days, available_time_start, available_time_end, status
-    } = req.body;
+    const updates = req.body;
+    updates.updated_at = Date.now();
+    delete updates._id;
+    delete updates.doctor_id; // prevent ID change
 
-    await run(
-      `UPDATE doctors SET
-        first_name = ?, last_name = ?, specialization = ?, phone = ?, email = ?,
-        qualification = ?, experience_years = ?, consultation_fee = ?,
-        available_days = ?, available_time_start = ?, available_time_end = ?, status = ?,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?`,
-      [first_name, last_name, specialization, phone, email,
-       qualification, experience_years, consultation_fee,
-       available_days, available_time_start, available_time_end, status, req.params.id]
-    );
+    const doctor = await Doctor.findByIdAndUpdate(req.params.id, updates, { new: true });
 
-    const doctor = await get('SELECT * FROM doctors WHERE id = ?', [req.params.id]);
+    if (!doctor) {
+      return res.status(404).json({ error: 'Doctor not found' });
+    }
+
     res.json(doctor);
   } catch (error) {
     console.error('Update doctor error:', error);
@@ -166,7 +156,13 @@ router.put('/:id', async (req, res) => {
 // Delete doctor (admin only)
 router.delete('/:id', authorize('admin'), async (req, res) => {
   try {
-    await run('DELETE FROM doctors WHERE id = ?', [req.params.id]);
+    const doctor = await Doctor.findByIdAndDelete(req.params.id);
+    if (!doctor) {
+      return res.status(404).json({ error: 'Doctor not found' });
+    }
+    // Ideally delete linked user too
+    await User.findOneAndDelete({ doctor_id: doctor._id });
+
     res.json({ message: 'Doctor deleted successfully' });
   } catch (error) {
     console.error('Delete doctor error:', error);
@@ -177,9 +173,8 @@ router.delete('/:id', authorize('admin'), async (req, res) => {
 // Get specializations
 router.get('/specializations/list', async (req, res) => {
   try {
-    const result = await query('SELECT DISTINCT specialization FROM doctors ORDER BY specialization');
-    const specializations = result.map(r => r.specialization);
-    res.json(specializations);
+    const specializations = await Doctor.distinct('specialization');
+    res.json(specializations.sort());
   } catch (error) {
     console.error('Get specializations error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -187,4 +182,3 @@ router.get('/specializations/list', async (req, res) => {
 });
 
 module.exports = router;
-

@@ -1,56 +1,13 @@
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
-const { DB_PATH } = require('./init');
+const mongoose = require('mongoose');
 
-function getDatabase() {
-  return new sqlite3.Database(DB_PATH, (err) => {
-    if (err) {
-      console.error('Error opening database:', err);
-    }
-  });
-}
+const connectDB = async () => {
+  try {
+    const conn = await mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/hospital_management');
+    console.log(`MongoDB Connected: ${conn.connection.host}`);
+  } catch (error) {
+    console.error(`Error: ${error.message}`);
+    process.exit(1);
+  }
+};
 
-function query(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    const db = getDatabase();
-    db.all(sql, params, (err, rows) => {
-      db.close();
-      if (err) {
-        reject(err);
-      } else {
-        resolve(rows);
-      }
-    });
-  });
-}
-
-function run(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    const db = getDatabase();
-    db.run(sql, params, function(err) {
-      db.close();
-      if (err) {
-        reject(err);
-      } else {
-        resolve({ id: this.lastID, changes: this.changes });
-      }
-    });
-  });
-}
-
-function get(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    const db = getDatabase();
-    db.get(sql, params, (err, row) => {
-      db.close();
-      if (err) {
-        reject(err);
-      } else {
-        resolve(row);
-      }
-    });
-  });
-}
-
-module.exports = { query, run, get, getDatabase };
-
+module.exports = connectDB;

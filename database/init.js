@@ -6,7 +6,7 @@ const bcrypt = require('bcryptjs');
 
 
 const DB_PATH =
-  process.env.DB_PATH || path.join(__dirname, '../Hospital Data/hospital.db');
+  process.env.DB_PATH || path.join(__dirname, '../database/hospital.db');
 
 const DATA_FOLDER = path.dirname(DB_PATH);
 
@@ -140,7 +140,7 @@ function initDatabase() {
       const adminEmail = 'admin@hospital.com';
       const adminPassword = 'admin123';
       const adminUsername = 'Sunam ';
-      const adminRole = 'Superadmin';
+      const adminRole = 'admin';
 
       bcrypt.hash(adminPassword, 10, (err, hash) => {
         if (err) {

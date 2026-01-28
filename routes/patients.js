@@ -1,7 +1,8 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const { query, run, get } = require('../database/db');
 const { authenticateToken, authorize } = require('../middleware/auth');
+const Patient = require('../models/Patient');
+const User = require('../models/User');
 
 const router = express.Router();
 
@@ -17,41 +18,44 @@ function generatePatientId() {
 router.get('/', async (req, res) => {
   try {
     const { search, page = 1, limit = 10 } = req.query;
-    const offset = (page - 1) * limit;
+    const skip = (page - 1) * limit;
 
-    let sql = 'SELECT * FROM patients WHERE 1=1';
-    const params = [];
+    let query = {};
 
     // Customers can only see their own record
     if (req.user.role === 'customer') {
-      const user = await get('SELECT patient_id FROM users WHERE id = ?', [req.user.id]);
+      const user = await User.findById(req.user.id);
       if (user && user.patient_id) {
-        sql += ' AND id = ?';
-        params.push(user.patient_id);
+        query._id = user.patient_id;
       } else {
         return res.json({ patients: [], pagination: { page: 1, limit: 10, total: 0, pages: 0 } });
       }
     }
 
     if (search && req.user.role !== 'customer') {
-      sql += ' AND (first_name LIKE ? OR last_name LIKE ? OR patient_id LIKE ? OR phone LIKE ?)';
-      const searchTerm = `%${search}%`;
-      params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+      const regex = new RegExp(search, 'i');
+      query.$or = [
+        { first_name: regex },
+        { last_name: regex },
+        { patient_id: regex }, // The string ID PAT...
+        { phone: regex }
+      ];
     }
 
-    sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), parseInt(offset));
+    const patients = await Patient.find(query)
+      .sort({ created_at: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
 
-    const patients = await query(sql, params);
-    const total = await get('SELECT COUNT(*) as count FROM patients' + (req.user.role === 'customer' ? ' WHERE id = ?' : ''), req.user.role === 'customer' ? [params[0]] : []);
+    const total = await Patient.countDocuments(query);
 
     res.json({
       patients,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
-        total: total.count,
-        pages: Math.ceil(total.count / limit)
+        total,
+        pages: Math.ceil(total / limit)
       }
     });
   } catch (error) {
@@ -63,10 +67,19 @@ router.get('/', async (req, res) => {
 // Get patient by ID
 router.get('/:id', async (req, res) => {
   try {
-    const patient = await get('SELECT * FROM patients WHERE id = ?', [req.params.id]);
+    const patient = await Patient.findById(req.params.id);
     if (!patient) {
       return res.status(404).json({ error: 'Patient not found' });
     }
+
+    // Authorization check for customer
+    if (req.user.role === 'customer') {
+      const user = await User.findById(req.user.id);
+      if (!user.patient_id || user.patient_id.toString() !== req.params.id) {
+        return res.status(403).json({ error: 'Unauthorized access' });
+      }
+    }
+
     res.json(patient);
   } catch (error) {
     console.error('Get patient error:', error);
@@ -94,18 +107,13 @@ router.post('/', authorize('admin'), [
       emergency_contact_phone, blood_group, allergies
     } = req.body;
 
-    const result = await run(
-      `INSERT INTO patients (
-        patient_id, first_name, last_name, date_of_birth, gender,
-        phone, email, address, emergency_contact_name,
-        emergency_contact_phone, blood_group, allergies
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [patientId, first_name, last_name, date_of_birth, gender,
-       phone, email, address, emergency_contact_name,
-       emergency_contact_phone, blood_group, allergies]
-    );
+    const patient = await Patient.create({
+      patient_id: patientId, // Custom string ID
+      first_name, last_name, date_of_birth, gender,
+      phone, email, address, emergency_contact_name,
+      emergency_contact_phone, blood_group, allergies
+    });
 
-    const patient = await get('SELECT * FROM patients WHERE id = ?', [result.id]);
     res.status(201).json(patient);
   } catch (error) {
     console.error('Create patient error:', error);
@@ -118,31 +126,26 @@ router.put('/:id', async (req, res) => {
   try {
     // Check if customer is trying to update their own record
     if (req.user.role === 'customer') {
-      const user = await get('SELECT patient_id FROM users WHERE id = ?', [req.user.id]);
-      if (!user || user.patient_id !== parseInt(req.params.id)) {
+      const user = await User.findById(req.user.id);
+      if (!user || !user.patient_id || user.patient_id.toString() !== req.params.id) {
         return res.status(403).json({ error: 'You can only update your own record' });
       }
     }
 
-    const {
-      first_name, last_name, date_of_birth, gender,
-      phone, email, address, emergency_contact_name,
-      emergency_contact_phone, blood_group, allergies
-    } = req.body;
+    // Sanitize body or just pass it (assuming model validation handles schema)
+    const updates = req.body;
+    updates.updated_at = Date.now();
 
-    await run(
-      `UPDATE patients SET
-        first_name = ?, last_name = ?, date_of_birth = ?, gender = ?,
-        phone = ?, email = ?, address = ?, emergency_contact_name = ?,
-        emergency_contact_phone = ?, blood_group = ?, allergies = ?,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?`,
-      [first_name, last_name, date_of_birth, gender,
-       phone, email, address, emergency_contact_name,
-       emergency_contact_phone, blood_group, allergies, req.params.id]
-    );
+    // Prevent updating immutable fields if necessary (like _id or patient_id string)
+    delete updates._id;
+    delete updates.patient_id;
 
-    const patient = await get('SELECT * FROM patients WHERE id = ?', [req.params.id]);
+    const patient = await Patient.findByIdAndUpdate(req.params.id, updates, { new: true });
+
+    if (!patient) {
+      return res.status(404).json({ error: 'Patient not found' });
+    }
+
     res.json(patient);
   } catch (error) {
     console.error('Update patient error:', error);
@@ -153,7 +156,11 @@ router.put('/:id', async (req, res) => {
 // Delete patient (admin only)
 router.delete('/:id', authorize('admin'), async (req, res) => {
   try {
-    await run('DELETE FROM patients WHERE id = ?', [req.params.id]);
+    const patient = await Patient.findByIdAndDelete(req.params.id);
+    if (!patient) {
+      return res.status(404).json({ error: 'Patient not found' });
+    }
+    // Ideally update user link too, but optional for now
     res.json({ message: 'Patient deleted successfully' });
   } catch (error) {
     console.error('Delete patient error:', error);
@@ -162,4 +169,3 @@ router.delete('/:id', authorize('admin'), async (req, res) => {
 });
 
 module.exports = router;
-

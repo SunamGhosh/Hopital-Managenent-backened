@@ -1,8 +1,8 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { body, validationResult } = require('express-validator');
-const { query, run, get } = require('../database/db');
 const { authenticateToken, authorize } = require('../middleware/auth');
+const User = require('../models/User');
 
 const router = express.Router();
 
@@ -14,21 +14,21 @@ router.use(authorize('admin'));
 router.get('/', async (req, res) => {
   try {
     const { search } = req.query;
-    
-    let sql = `SELECT id, username, email, role, created_at 
-               FROM users 
-               WHERE role = 'admin'`;
-    const params = [];
+
+    let query = { role: 'admin' };
 
     if (search) {
-      sql += ' AND (username LIKE ? OR email LIKE ?)';
-      const searchTerm = `%${search}%`;
-      params.push(searchTerm, searchTerm);
+      const regex = new RegExp(search, 'i');
+      query.$or = [
+        { username: regex },
+        { email: regex }
+      ];
     }
 
-    sql += ' ORDER BY created_at DESC';
+    const admins = await User.find(query)
+      .select('username email role created_at')
+      .sort({ created_at: -1 });
 
-    const admins = await query(sql, params);
     res.json(admins);
   } catch (error) {
     console.error('Get admins error:', error);
@@ -39,15 +39,13 @@ router.get('/', async (req, res) => {
 // Get admin by ID
 router.get('/:id', async (req, res) => {
   try {
-    const admin = await get(
-      'SELECT id, username, email, role, created_at FROM users WHERE id = ? AND role = ?',
-      [req.params.id, 'admin']
-    );
-    
+    const admin = await User.findOne({ _id: req.params.id, role: 'admin' })
+      .select('username email role created_at');
+
     if (!admin) {
       return res.status(404).json({ error: 'Admin not found' });
     }
-    
+
     res.json(admin);
   } catch (error) {
     console.error('Get admin error:', error);
@@ -70,7 +68,7 @@ router.post('/', [
     const { username, email, password } = req.body;
 
     // Check if user already exists
-    const existingUser = await get('SELECT * FROM users WHERE email = ? OR username = ?', [email, username]);
+    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
     if (existingUser) {
       return res.status(400).json({ error: 'User with this email or username already exists' });
     }
@@ -79,18 +77,19 @@ router.post('/', [
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Create admin user
-    const result = await run(
-      'INSERT INTO users (username, email, password, role) VALUES (?, ?, ?, ?)',
-      [username, email, hashedPassword, 'admin']
-    );
-
-    const admin = await get(
-      'SELECT id, username, email, role, created_at FROM users WHERE id = ?',
-      [result.id]
-    );
+    const admin = await User.create({
+      username,
+      email,
+      password: hashedPassword,
+      role: 'admin'
+    });
 
     res.status(201).json({
-      ...admin,
+      id: admin._id,
+      username: admin.username,
+      email: admin.email,
+      role: admin.role,
+      created_at: admin.created_at,
       message: 'Admin created successfully',
       login_email: email,
       login_username: username
@@ -105,16 +104,15 @@ router.post('/', [
 router.delete('/:id', async (req, res) => {
   try {
     // Prevent admin from deleting themselves
-    if (parseInt(req.params.id) === req.user.id) {
+    if (req.params.id === req.user.id) {
       return res.status(400).json({ error: 'You cannot delete your own account' });
     }
 
-    const admin = await get('SELECT * FROM users WHERE id = ? AND role = ?', [req.params.id, 'admin']);
+    const admin = await User.findOneAndDelete({ _id: req.params.id, role: 'admin' });
     if (!admin) {
       return res.status(404).json({ error: 'Admin not found' });
     }
 
-    await run('DELETE FROM users WHERE id = ?', [req.params.id]);
     res.json({ message: 'Admin deleted successfully' });
   } catch (error) {
     console.error('Delete admin error:', error);
@@ -123,4 +121,3 @@ router.delete('/:id', async (req, res) => {
 });
 
 module.exports = router;
-

@@ -1,6 +1,9 @@
 const express = require('express');
-const { query, get } = require('../database/db');
 const { authenticateToken } = require('../middleware/auth');
+const Patient = require('../models/Patient');
+const Doctor = require('../models/Doctor');
+const Appointment = require('../models/Appointment');
+const User = require('../models/User');
 
 const router = express.Router();
 
@@ -15,122 +18,114 @@ router.get('/stats', async (req, res) => {
 
     if (userRole === 'admin') {
       // Admin sees all statistics
-      const totalPatients = await get('SELECT COUNT(*) as count FROM patients');
-      const totalDoctors = await get('SELECT COUNT(*) as count FROM doctors WHERE status = ?', ['active']);
+      const totalPatients = await Patient.countDocuments();
+      const totalDoctors = await Doctor.countDocuments({ status: 'active' });
+
       const today = new Date().toISOString().split('T')[0];
-      const appointmentsToday = await get(
-        'SELECT COUNT(*) as count FROM appointments WHERE appointment_date = ? AND status != ?',
-        [today, 'cancelled']
-      );
-      const pendingAppointments = await get(
-        'SELECT COUNT(*) as count FROM appointments WHERE status = ?',
-        ['scheduled']
-      );
-      const recentAppointments = await query(
-        `SELECT 
-          a.*,
-          p.first_name as patient_first_name,
-          p.last_name as patient_last_name,
-          d.first_name as doctor_first_name,
-          d.last_name as doctor_last_name,
-          d.specialization
-        FROM appointments a
-        LEFT JOIN patients p ON a.patient_id = p.id
-        LEFT JOIN doctors d ON a.doctor_id = d.id
-        WHERE a.appointment_date >= date('now')
-        ORDER BY a.appointment_date ASC, a.appointment_time ASC
-        LIMIT 10`
-      );
-      const appointmentsByStatus = await query(
-        'SELECT status, COUNT(*) as count FROM appointments GROUP BY status'
-      );
-      const patientsByGender = await query(
-        'SELECT gender, COUNT(*) as count FROM patients GROUP BY gender'
-      );
+
+      const appointmentsToday = await Appointment.countDocuments({
+        appointment_date: today,
+        status: { $ne: 'cancelled' }
+      });
+
+      const pendingAppointments = await Appointment.countDocuments({
+        status: 'scheduled'
+      });
+
+      const recentAppointments = await Appointment.find({
+        appointment_date: { $gte: today }
+      })
+        .sort({ appointment_date: 1, appointment_time: 1 })
+        .limit(10)
+        .populate('patient_id', 'first_name last_name')
+        .populate('doctor_id', 'first_name last_name specialization');
+
+      const appointmentsByStatus = await Appointment.aggregate([
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+        { $project: { status: '$_id', count: 1, _id: 0 } }
+      ]);
+
+      const patientsByGender = await Patient.aggregate([
+        { $group: { _id: '$gender', count: { $sum: 1 } } },
+        { $project: { gender: '$_id', count: 1, _id: 0 } }
+      ]);
 
       stats = {
-        totalPatients: totalPatients.count,
-        totalDoctors: totalDoctors.count,
-        appointmentsToday: appointmentsToday.count,
-        pendingAppointments: pendingAppointments.count,
+        totalPatients,
+        totalDoctors,
+        appointmentsToday,
+        pendingAppointments,
         recentAppointments,
         appointmentsByStatus,
         patientsByGender
       };
     } else if (userRole === 'doctor') {
       // Doctor sees their own statistics
-      const user = await get('SELECT doctor_id FROM users WHERE id = ?', [req.user.id]);
+      const user = await User.findById(req.user.id);
       if (!user || !user.doctor_id) {
         return res.json({ error: 'Doctor profile not found' });
       }
 
       const today = new Date().toISOString().split('T')[0];
-      const appointmentsToday = await get(
-        'SELECT COUNT(*) as count FROM appointments WHERE doctor_id = ? AND appointment_date = ? AND status != ?',
-        [user.doctor_id, today, 'cancelled']
-      );
-      const pendingAppointments = await get(
-        'SELECT COUNT(*) as count FROM appointments WHERE doctor_id = ? AND status = ?',
-        [user.doctor_id, 'scheduled']
-      );
-      const recentAppointments = await query(
-        `SELECT 
-          a.*,
-          p.first_name as patient_first_name,
-          p.last_name as patient_last_name,
-          d.first_name as doctor_first_name,
-          d.last_name as doctor_last_name,
-          d.specialization
-        FROM appointments a
-        LEFT JOIN patients p ON a.patient_id = p.id
-        LEFT JOIN doctors d ON a.doctor_id = d.id
-        WHERE a.doctor_id = ? AND a.appointment_date >= date('now')
-        ORDER BY a.appointment_date ASC, a.appointment_time ASC
-        LIMIT 10`,
-        [user.doctor_id]
-      );
+
+      const appointmentsToday = await Appointment.countDocuments({
+        doctor_id: user.doctor_id,
+        appointment_date: today,
+        status: { $ne: 'cancelled' }
+      });
+
+      const pendingAppointments = await Appointment.countDocuments({
+        doctor_id: user.doctor_id,
+        status: 'scheduled'
+      });
+
+      const recentAppointments = await Appointment.find({
+        doctor_id: user.doctor_id,
+        appointment_date: { $gte: today }
+      })
+        .sort({ appointment_date: 1, appointment_time: 1 })
+        .limit(10)
+        .populate('patient_id', 'first_name last_name')
+        .populate('doctor_id', 'first_name last_name specialization');
 
       stats = {
-        appointmentsToday: appointmentsToday.count,
-        pendingAppointments: pendingAppointments.count,
+        appointmentsToday,
+        pendingAppointments,
         recentAppointments
       };
     } else if (userRole === 'customer') {
       // Customer sees their own statistics
-      const user = await get('SELECT patient_id FROM users WHERE id = ?', [req.user.id]);
+      const user = await User.findById(req.user.id);
       if (!user || !user.patient_id) {
         return res.json({ error: 'Patient profile not found' });
       }
 
       const today = new Date().toISOString().split('T')[0];
-      const appointmentsToday = await get(
-        'SELECT COUNT(*) as count FROM appointments WHERE patient_id = ? AND appointment_date = ? AND status != ?',
-        [user.patient_id, today, 'cancelled']
-      );
-      const upcomingAppointments = await get(
-        'SELECT COUNT(*) as count FROM appointments WHERE patient_id = ? AND appointment_date >= date("now") AND status = ?',
-        [user.patient_id, 'scheduled']
-      );
-      const recentAppointments = await query(
-        `SELECT 
-          a.*,
-          p.first_name as patient_first_name,
-          p.last_name as patient_last_name,
-          d.first_name as doctor_first_name,
-          d.last_name as doctor_last_name,
-          d.specialization
-        FROM appointments a
-        LEFT JOIN patients p ON a.patient_id = p.id
-        LEFT JOIN doctors d ON a.doctor_id = d.id
-        WHERE a.patient_id = ? AND a.appointment_date >= date('now')
-        ORDER BY a.appointment_date ASC, a.appointment_time ASC
-        LIMIT 10`,
-        [user.patient_id]
-      );
+
+      const appointmentsToday = await Appointment.countDocuments({
+        patient_id: user.patient_id,
+        appointment_date: today,
+        status: { $ne: 'cancelled' }
+      });
+
+      const upcomingAppointments = await Appointment.countDocuments({
+        patient_id: user.patient_id,
+        appointment_date: { $gte: today },
+        status: 'scheduled'
+      });
+
+      const recentAppointments = await Appointment.find({
+        patient_id: user.patient_id,
+        appointment_date: { $gte: today }
+      })
+        .sort({ appointment_date: 1, appointment_time: 1 })
+        .limit(10)
+        .populate('patient_id', 'first_name last_name')
+        .populate('doctor_id', 'first_name last_name specialization');
 
       stats = {
-        appointmentsToday: appointmentsToday.count,
-        upcomingAppointments: upcomingAppointments.count,
+        appointmentsToday,
+        upcomingAppointments,
         recentAppointments
       };
     }
@@ -143,4 +138,3 @@ router.get('/stats', async (req, res) => {
 });
 
 module.exports = router;
-

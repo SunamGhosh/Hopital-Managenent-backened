@@ -1,7 +1,11 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const { query, run, get } = require('../database/db');
 const { authenticateToken, authorize } = require('../middleware/auth');
+const MedicalRecord = require('../models/MedicalRecord');
+const Patient = require('../models/Patient');
+const Doctor = require('../models/Doctor');
+const Appointment = require('../models/Appointment');
+const User = require('../models/User');
 
 const router = express.Router();
 
@@ -18,26 +22,13 @@ router.get('/', async (req, res) => {
   try {
     const { patient_id, doctor_id } = req.query;
 
-    let sql = `SELECT 
-      mr.*,
-      p.first_name as patient_first_name,
-      p.last_name as patient_last_name,
-      p.patient_id as patient_code,
-      d.first_name as doctor_first_name,
-      d.last_name as doctor_last_name,
-      d.specialization
-    FROM medical_records mr
-    LEFT JOIN patients p ON mr.patient_id = p.id
-    LEFT JOIN doctors d ON mr.doctor_id = d.id
-    WHERE 1=1`;
-    const params = [];
+    let query = {};
 
     // Customers can only see their own records
     if (req.user.role === 'customer') {
-      const user = await get('SELECT patient_id FROM users WHERE id = ?', [req.user.id]);
+      const user = await User.findById(req.user.id);
       if (user && user.patient_id) {
-        sql += ' AND mr.patient_id = ?';
-        params.push(user.patient_id);
+        query.patient_id = user.patient_id;
       } else {
         return res.json([]);
       }
@@ -45,28 +36,27 @@ router.get('/', async (req, res) => {
 
     // Doctors can only see records they created
     if (req.user.role === 'doctor') {
-      const user = await get('SELECT doctor_id FROM users WHERE id = ?', [req.user.id]);
+      const user = await User.findById(req.user.id);
       if (user && user.doctor_id) {
-        sql += ' AND mr.doctor_id = ?';
-        params.push(user.doctor_id);
+        query.doctor_id = user.doctor_id;
       } else {
         return res.json([]);
       }
     }
 
     if (patient_id && req.user.role !== 'customer') {
-      sql += ' AND mr.patient_id = ?';
-      params.push(patient_id);
+      query.patient_id = patient_id;
     }
 
     if (doctor_id && req.user.role !== 'doctor') {
-      sql += ' AND mr.doctor_id = ?';
-      params.push(doctor_id);
+      query.doctor_id = doctor_id;
     }
 
-    sql += ' ORDER BY mr.visit_date DESC, mr.created_at DESC';
+    const records = await MedicalRecord.find(query)
+      .populate('patient_id', 'first_name last_name patient_id')
+      .populate('doctor_id', 'first_name last_name specialization')
+      .sort({ visit_date: -1, created_at: -1 });
 
-    const records = await query(sql, params);
     res.json(records);
   } catch (error) {
     console.error('Get medical records error:', error);
@@ -77,24 +67,9 @@ router.get('/', async (req, res) => {
 // Get medical record by ID
 router.get('/:id', async (req, res) => {
   try {
-    const record = await get(
-      `SELECT 
-        mr.*,
-        p.first_name as patient_first_name,
-        p.last_name as patient_last_name,
-        p.patient_id as patient_code,
-        p.date_of_birth,
-        p.gender,
-        p.blood_group,
-        d.first_name as doctor_first_name,
-        d.last_name as doctor_last_name,
-        d.specialization
-      FROM medical_records mr
-      LEFT JOIN patients p ON mr.patient_id = p.id
-      LEFT JOIN doctors d ON mr.doctor_id = d.id
-      WHERE mr.id = ?`,
-      [req.params.id]
-    );
+    const record = await MedicalRecord.findById(req.params.id)
+      .populate('patient_id', 'first_name last_name patient_id date_of_birth gender blood_group')
+      .populate('doctor_id', 'first_name last_name specialization');
 
     if (!record) {
       return res.status(404).json({ error: 'Medical record not found' });
@@ -124,43 +99,38 @@ router.post('/', authorize('admin', 'doctor'), [
     } = req.body;
 
     // Check if patient exists
-    const patient = await get('SELECT * FROM patients WHERE id = ?', [patient_id]);
+    const patient = await Patient.findById(patient_id);
     if (!patient) {
       return res.status(404).json({ error: 'Patient not found' });
     }
 
     // Check if doctor exists
-    const doctor = await get('SELECT * FROM doctors WHERE id = ?', [doctor_id]);
+    const doctor = await Doctor.findById(doctor_id);
     if (!doctor) {
       return res.status(404).json({ error: 'Doctor not found' });
     }
 
     const recordId = generateRecordId();
-    const result = await run(
-      `INSERT INTO medical_records (
-        record_id, patient_id, doctor_id, appointment_id,
-        diagnosis, symptoms, prescription, test_results, notes, visit_date
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [recordId, patient_id, doctor_id, appointment_id || null,
-       diagnosis, symptoms, prescription, test_results, notes, visit_date]
-    );
 
-    const record = await get(
-      `SELECT 
-        mr.*,
-        p.first_name as patient_first_name,
-        p.last_name as patient_last_name,
-        d.first_name as doctor_first_name,
-        d.last_name as doctor_last_name,
-        d.specialization
-      FROM medical_records mr
-      LEFT JOIN patients p ON mr.patient_id = p.id
-      LEFT JOIN doctors d ON mr.doctor_id = d.id
-      WHERE mr.id = ?`,
-      [result.id]
-    );
+    // Check appointment if provided
+    if (appointment_id) {
+      const appointment = await Appointment.findById(appointment_id);
+      if (!appointment) {
+        // Optional: Fail or just ignore and set null
+      }
+    }
 
-    res.status(201).json(record);
+    const record = await MedicalRecord.create({
+      record_id: recordId,
+      patient_id, doctor_id, appointment_id: appointment_id || null,
+      diagnosis, symptoms, prescription, test_results, notes, visit_date
+    });
+
+    const populatedRecord = await MedicalRecord.findById(record._id)
+      .populate('patient_id', 'first_name last_name')
+      .populate('doctor_id', 'first_name last_name specialization');
+
+    res.status(201).json(populatedRecord);
   } catch (error) {
     console.error('Create medical record error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -170,33 +140,20 @@ router.post('/', authorize('admin', 'doctor'), [
 // Update medical record (admin and doctor only)
 router.put('/:id', authorize('admin', 'doctor'), async (req, res) => {
   try {
-    const {
-      diagnosis, symptoms, prescription, test_results, notes, visit_date
-    } = req.body;
+    const updates = req.body;
+    updates.updated_at = Date.now();
+    delete updates._id;
+    delete updates.record_id;
+    delete updates.patient_id;
+    delete updates.doctor_id;
 
-    await run(
-      `UPDATE medical_records SET
-        diagnosis = ?, symptoms = ?, prescription = ?,
-        test_results = ?, notes = ?, visit_date = ?,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?`,
-      [diagnosis, symptoms, prescription, test_results, notes, visit_date, req.params.id]
-    );
+    const record = await MedicalRecord.findByIdAndUpdate(req.params.id, updates, { new: true })
+      .populate('patient_id', 'first_name last_name')
+      .populate('doctor_id', 'first_name last_name specialization');
 
-    const record = await get(
-      `SELECT 
-        mr.*,
-        p.first_name as patient_first_name,
-        p.last_name as patient_last_name,
-        d.first_name as doctor_first_name,
-        d.last_name as doctor_last_name,
-        d.specialization
-      FROM medical_records mr
-      LEFT JOIN patients p ON mr.patient_id = p.id
-      LEFT JOIN doctors d ON mr.doctor_id = d.id
-      WHERE mr.id = ?`,
-      [req.params.id]
-    );
+    if (!record) {
+      return res.status(404).json({ error: 'Medical record not found' });
+    }
 
     res.json(record);
   } catch (error) {
@@ -208,7 +165,10 @@ router.put('/:id', authorize('admin', 'doctor'), async (req, res) => {
 // Delete medical record (admin only)
 router.delete('/:id', authorize('admin'), async (req, res) => {
   try {
-    await run('DELETE FROM medical_records WHERE id = ?', [req.params.id]);
+    const record = await MedicalRecord.findByIdAndDelete(req.params.id);
+    if (!record) {
+      return res.status(404).json({ error: 'Medical record not found' });
+    }
     res.json({ message: 'Medical record deleted successfully' });
   } catch (error) {
     console.error('Delete medical record error:', error);
@@ -217,4 +177,3 @@ router.delete('/:id', authorize('admin'), async (req, res) => {
 });
 
 module.exports = router;
-
