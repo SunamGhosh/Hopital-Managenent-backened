@@ -187,6 +187,45 @@ router.put('/:id', async (req, res) => {
   }
 });
 
+// Update appointment status (quick update for doctors)
+router.patch('/:id/status', async (req, res) => {
+  try {
+    const { status } = req.body;
+
+    if (!status || !['scheduled', 'completed', 'cancelled'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    const appointment = await Appointment.findById(req.params.id);
+    if (!appointment) {
+      return res.status(404).json({ error: 'Appointment not found' });
+    }
+
+    // Doctors can only update their own appointments
+    if (req.user.role === 'doctor') {
+      const user = await User.findById(req.user.id);
+      if (!user || !user.doctor_id || user.doctor_id.toString() !== appointment.doctor_id.toString()) {
+        return res.status(403).json({ error: 'You can only update your own appointments' });
+      }
+    } else if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+
+    appointment.status = status;
+    appointment.updated_at = Date.now();
+    await appointment.save();
+
+    const populatedAppointment = await Appointment.findById(appointment._id)
+      .populate('patient_id', 'first_name last_name')
+      .populate('doctor_id', 'first_name last_name specialization');
+
+    res.json(populatedAppointment);
+  } catch (error) {
+    console.error('Update appointment status error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Delete appointment (admin only, or customer can cancel their own)
 /**
  * Note: Deleting wipes the record. Usually canceling just updates status.
