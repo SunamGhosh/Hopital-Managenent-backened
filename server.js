@@ -13,6 +13,8 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+const path = require('path');
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Routes
 app.use('/api/auth', require('./routes/auth'));
@@ -22,6 +24,7 @@ app.use('/api/appointments', require('./routes/appointments'));
 app.use('/api/medical-records', require('./routes/medicalRecords'));
 app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/admins', require('./routes/admins'));
+app.use('/api/medicines', require('./routes/medicines'));
 
 // Health check
 app.get('/api/health', (req, res) => {
